@@ -1,0 +1,187 @@
+import flet as ft
+import cv2
+import base64
+import insightface
+import os
+import numpy as np
+from insightface.app import FaceAnalysis
+
+# -------------------------------
+# تحميل الموديلات (أقوى دقة)
+# -------------------------------
+# استخدام CPUExecutionProvider لضمان التوافق مع معظم الأجهزة
+try:
+    app = FaceAnalysis(name='buffalo_l', providers=['CPUExecutionProvider'])
+    app.prepare(ctx_id=-1, det_size=(640, 640)) # حجم 640 كافٍ ومتوازن للسرعة
+except Exception as e:
+    print(f"Error initializing FaceAnalysis: {e}")
+
+model_path = 'inswapper_128.onnx'
+
+if not os.path.exists(model_path):
+    # بدلاً من إغلاق التطبيق، سنعرض تنبيهاً في الواجهة لاحقاً
+    print(f"❌ ملف {model_path} غير موجود!")
+
+swapper = None
+if os.path.exists(model_path):
+    swapper = insightface.model_zoo.get_model(model_path)
+
+# -------------------------------
+# تحويل الصورة إلى Base64
+# -------------------------------
+def cv2_to_base64(img):
+    _, buffer = cv2.imencode('.jpg', img)
+    return base64.b64encode(buffer).decode()
+
+# -------------------------------
+# تحجيم الصورة للحفاظ على الأداء
+# -------------------------------
+def resize_keep_ratio(img, size=640):
+    h, w = img.shape[:2]
+    scale = size / max(h, w)
+    new_w, new_h = int(w * scale), int(h * scale)
+    return cv2.resize(img, (new_w, new_h))
+
+def main(page: ft.Page):
+    page.title = "Face Swap"
+    page.theme_mode = ft.ThemeMode.DARK
+    page.window_width = 800
+    page.window_height = 900
+    page.scroll = "auto"
+    page.padding = 30
+    page.horizontal_alignment = ft.CrossAxisAlignment.CENTER
+
+    img1_path = [None]
+    img2_path = [None]
+    picking_for = [1]
+
+    # مكونات العرض
+    image1 = ft.Image(width=300, height=300, fit=ft.ImageFit.CONTAIN, visible=False, border_radius=10)
+    image2 = ft.Image(width=300, height=300, fit=ft.ImageFit.CONTAIN, visible=False, border_radius=10)
+    result_img_control = ft.Image(width=450, height=450, fit=ft.ImageFit.CONTAIN, visible=False, border_radius=15)
+    
+    status = ft.Text("", size=16, weight="bold")
+    progress_ring = ft.ProgressRing(visible=False, width=20, height=20)
+
+    # -------------------------------
+    # منطق اختيار الملفات
+    # -------------------------------
+    def on_file_result(e: ft.FilePickerResultEvent):
+        if e.files:
+            path = e.files[0].path
+            if picking_for[0] == 1:
+                img1_path[0] = path
+                image1.src = path
+                image1.visible = True
+            else:
+                img2_path[0] = path
+                image2.src = path
+                image2.visible = True
+            page.update()
+
+    file_picker = ft.FilePicker(on_result=on_file_result)
+    page.overlay.append(file_picker)
+
+    def pick_logic(target):
+        picking_for[0] = target
+        file_picker.pick_files(file_type=ft.FilePickerFileType.IMAGE)
+
+    # -------------------------------
+    # معالجة تبديل الوجوه
+    # -------------------------------
+    def swap_faces(e):
+        if not swapper:
+            status.value = "❌ ملف الموديل inswapper_128.onnx مفقود!"
+            status.color = ft.colors.RED
+            page.update()
+            return
+
+        if not img1_path[0] or not img2_path[0]:
+            status.value = "❌ يرجى اختيار الصورتين أولاً"
+            status.color = ft.colors.AMBER
+            page.update()
+            return
+
+        status.value = "⏳ جاري تحليل الوجوه والتبديل..."
+        status.color = ft.colors.BLUE_200
+        progress_ring.visible = True
+        page.update()
+
+        try:
+            # قراءة ومعالجة الصور
+            img1 = cv2.imread(img1_path[0])
+            img2 = cv2.imread(img2_path[0])
+
+            if img1 is None or img2 is None:
+                raise Exception("تعذر قراءة ملفات الصور")
+
+            # تصغير الصور للحفاظ على سرعة المعالجة والذاكرة
+            img1 = resize_keep_ratio(img1)
+            img2 = resize_keep_ratio(img2)
+
+            # استخراج الوجوه
+            faces1 = app.get(img1)
+            faces2 = app.get(img2)
+
+            if not faces1 or not faces2:
+                raise Exception("لم نتمكن من العثور على وجه واضح في إحدى الصور")
+
+            # ترتيب الوجوه حسب الحجم لاختيار الأكبر تلقائياً
+            face1 = sorted(faces1, key=lambda x: (x.bbox[2]-x.bbox[0])*(x.bbox[3]-x.bbox[1]), reverse=True)[0]
+            face2 = sorted(faces2, key=lambda x: (x.bbox[2]-x.bbox[0])*(x.bbox[3]-x.bbox[1]), reverse=True)[0]
+
+            # تنفيذ عملية التبديل
+            res = swapper.get(img1, face1, face2, paste_back=True)
+
+            # تحديث الواجهة بالنتيجة
+            result_img_control.src_base64 = cv2_to_base64(res)
+            result_img_control.visible = True
+            status.value = "✅ اكتمل التبديل بنجاح!"
+            status.color = ft.colors.GREEN_400
+            
+        except Exception as ex:
+            status.value = f"❌ خطأ: {str(ex)}"
+            status.color = ft.colors.RED
+        
+        progress_ring.visible = False
+        page.update()
+
+    # -------------------------------
+    # واجهة المستخدم (Layout)
+    # -------------------------------
+    page.add(
+        ft.Column([
+            ft.Text("Face Swap", size=40, weight="bold", color=ft.colors.BLUE_400),
+            ft.Text("قم بتبديل الوجوه بدقة عالية ", size=16, color=ft.colors.GREY_400),
+            ft.Divider(height=40, color="transparent"),
+            
+            ft.Row([
+                ft.ElevatedButton("الصورة الأساسية", icon=ft.icons.IMAGE, on_click=lambda _: pick_logic(1)),
+                ft.ElevatedButton("صورة الوجه", icon=ft.icons.FACE, on_click=lambda _: pick_logic(2)),
+            ], alignment=ft.MainAxisAlignment.CENTER),
+            
+            ft.Row([image1, image2], alignment=ft.MainAxisAlignment.CENTER, spacing=20),
+            
+            ft.Divider(height=20, color="transparent"),
+            
+            ft.Row([
+                ft.ElevatedButton(
+                    "🚀 بدء التبديل", 
+                    on_click=swap_faces,
+                    style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=10)),
+                    height=50,
+                    width=200
+                ),
+                progress_ring
+            ], alignment=ft.MainAxisAlignment.CENTER),
+            
+            status,
+            
+            ft.Divider(height=30),
+            
+            ft.Text("النتيجة النهائية", size=22, weight="w600", visible=False),
+            result_img_control
+        ], horizontal_alignment=ft.CrossAxisAlignment.CENTER)
+    )
+
+ft.app(target=main,assets_dir='asstes')
