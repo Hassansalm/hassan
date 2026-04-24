@@ -1,0 +1,330 @@
+from flet import *
+import os
+import pickle
+
+from google_auth_oauthlib.flow import InstalledAppFlow
+from google.auth.transport.requests import Request
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaFileUpload
+
+SCOPES = ['https://www.googleapis.com/auth/drive.file']
+TOKEN_FILE = "token.pickle"
+CREDENTIALS_FILE = "credentials.json"
+
+# ================== GOOGLE AUTH ==================
+def get_drive_service():
+    creds = None
+
+    if os.path.exists(TOKEN_FILE):
+        with open(TOKEN_FILE, "rb") as t:
+            creds = pickle.load(t)
+
+    if not creds or not creds.valid:
+        if creds and creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+        else:
+            flow = InstalledAppFlow.from_client_secrets_file(
+                CREDENTIALS_FILE, SCOPES
+            )
+            creds = flow.run_local_server(port=0)
+
+        with open(TOKEN_FILE, "wb") as t:
+            pickle.dump(creds, t)
+
+    return build("drive", "v3", credentials=creds)
+
+# ================== FOLDER GET OR CREATE ==================
+def get_or_create_folder(service, name, parent_id=None):
+    # البحث عن المجلد مع التأكد من وجوده داخل الأب (إن وجد)
+    query = f"name='{name}' and mimeType='application/vnd.google-apps.folder' and trashed=false"
+    if parent_id:
+        query += f" and '{parent_id}' in parents"
+    
+    res = service.files().list(q=query, fields="files(id,name)").execute()
+    files = res.get("files", [])
+
+    if files:
+        return files[0]["id"]
+
+    # إنشاء المجلد وربطه بالأب إذا تم توفيره
+    folder_metadata = {
+        "name": name,
+        "mimeType": "application/vnd.google-apps.folder"
+    }
+    if parent_id:
+        folder_metadata["parents"] = [parent_id]
+
+    created = service.files().create(body=folder_metadata, fields="id").execute()
+    return created["id"]
+
+# ================== UPLOAD ==================
+def upload_file(service, path, folder_id):
+    file_name = os.path.basename(path)
+
+    media = MediaFileUpload(path)
+
+    file_metadata = {
+        "name": file_name,
+        "parents": [folder_id]
+    }
+
+    service.files().create(
+        body=file_metadata,
+        media_body=media
+    ).execute()
+
+
+    ###### load image ####
+    
+
+  ######### mainnn ########  
+def main(page:Page) :
+    page.window.left=960
+    page.window.height=960
+    page.window.top=10
+    page.window.width=400
+    page.scroll='auto'
+    page.padding = 20
+    page.theme_mode = ThemeMode.DARK
+    
+    zone_name = TextField(label='zone num',color=colors.BLACK,
+                          bgcolor="#FFFFFF",
+                          helper_text='ex: zone 60..',
+                          )
+    fat_name = TextField(label='fat num',color=colors.BLACK,
+                          bgcolor="#FFFFFF",
+                          helper_text='ex: fat 29..',
+                          )
+    
+    select_after_out =ElevatedButton("قبل للفات من الخارج" , bgcolor=colors.GREY ,
+                                     color=colors.BLACK,
+                                     style=ButtonStyle(shape=RoundedRectangleBorder(radius=10)),
+                                      on_click=lambda e:pick_image(image_after_out) )
+    select_after_in = ElevatedButton ("قبل للفات من الداخل" , bgcolor=colors.GREY ,
+                                      color=colors.BLACK ,
+                                      style=ButtonStyle(shape=RoundedRectangleBorder(radius=10)),
+                                      on_click= lambda e: pick_image(image_after_in))
+    select_before_out = ElevatedButton ("بعد للفات من الخارج" , bgcolor=colors.GREY ,
+                                        color=colors.BLACK ,
+                                        on_click= lambda e: pick_image(image_before_out),
+                                        style=ButtonStyle(shape=RoundedRectangleBorder(radius=10)))
+    select_before_in = ElevatedButton ("بعد للفات من الداخل " , bgcolor=colors.GREY ,
+                                       color=colors.BLACK ,
+                                       on_click= lambda e:pick_image(image_before_in),
+                                       style=ButtonStyle(shape=RoundedRectangleBorder(radius=10)))
+    
+    image_after_out=Image(width=200 , height=400 ,fit=ImageFit.COVER ,border_radius=border_radius.all(10))
+    image_after_in = Image(width=200 , height=400 ,fit=ImageFit.COVER,border_radius=border_radius.all(10))
+    image_before_out = Image(width=200 , height=400 ,fit=ImageFit.COVER ,border_radius=border_radius.all(10))
+    image_before_in = Image(width=200 , height=400 ,fit=ImageFit.COVER ,border_radius=border_radius.all(10))
+
+    
+    
+    ####### file picker ########
+    select_image ={"img":None}
+    def pick_file_result(e:FilePickerResultEvent):
+        if e.files:
+            path = e.files[0].path
+            select_image["img"].src= path
+            page.update()
+    file_picker =FilePicker(on_result=pick_file_result)
+    page.overlay.append(file_picker)
+
+    ########## button action ##########
+    def pick_image(target_image):
+        select_image["img"]=target_image
+        file_picker.pick_files(allow_multiple=True)
+
+    
+        ########## هنا الرفع #######
+    def handle_upload(e):
+        if not zone_name.value or not fat_name.value:
+            page.snack_bar = SnackBar(Text("يرجى إدخال رقم المنطقة والـ FAT"))
+            page.snack_bar.open = True
+            page.update()
+            return
+
+        try:
+            service = get_drive_service()
+            # 1. إنشاء/جلب مجلد المنطقة (الرئيسي)
+            zone_folder_id = get_or_create_folder(service, zone_name.value)
+            # 2. إنشاء/جلب مجلد الـ FAT داخل مجلد المنطقة
+            fat_folder_id = get_or_create_folder(service, fat_name.value, parent_id=zone_folder_id)
+
+            # قائمة بالصور المطلوب رفعها
+            images_to_upload = [
+                (image_after_out, "Outside_Before"),
+                (image_after_in, "Inside_Before"),
+                (image_before_out, "Outside_After"),
+                (image_before_in, "Inside_After")
+            ]
+
+            for img_control, prefix in images_to_upload:
+                if img_control.src:
+                    file_name = f"{prefix}_{os.path.basename(img_control.src)}"
+                    media = MediaFileUpload(img_control.src)
+                    file_metadata = {
+                    "name": file_name, 
+                    "parents": [fat_folder_id] # الرفع داخل مجلد الـ FAT
+                    }
+                    service.files().create(body=file_metadata, media_body=media).execute()
+
+            page.snack_bar = SnackBar(Text("تم رفع جميع الصور بنجاح!"))
+            page.snack_bar.open = True
+        except Exception as ex:
+            page.snack_bar = SnackBar(Text(f"خطأ: {str(ex)}"))
+            page.snack_bar.open = True
+        page.update()
+    send_and_save = ElevatedButton("حفض الصور" , bgcolor=colors.GREY ,
+                                     color=colors.BLACK,
+                                     on_click=handle_upload,
+                                     style=ButtonStyle(shape=RoundedRectangleBorder(radius=10)) )
+    
+    ########### load file ############
+    # عنصر لعرض الصور بشكل شبكي (Grid)
+    images_grid = GridView(
+        expand=True,
+        runs_count=2,
+        max_extent=200,
+        child_aspect_ratio=0.7,
+        spacing=10,
+        run_spacing=10,
+    )
+    def load_drive_images(e):
+    # التحقق من أن المستخدم أدخل بيانات البحث
+        if not zone_name.value or not fat_name.value:
+            page.snack_bar = SnackBar(Text("يرجى كتابة رقم المنطقة والـ FAT أولاً في الصفحة الرئيسية"))
+            page.snack_bar.open = True
+            page.update()
+            return
+
+        try:
+            images_grid.controls.clear()
+            page.snack_bar = SnackBar(Text("جاري جلب الصور من Drive..."))
+            page.snack_bar.open = True
+            page.update()
+
+            service = get_drive_service()
+            
+            # 1. البحث عن مجلد المنطقة ثم مجلد الـ FAT
+            zone_id = get_or_create_folder(service, zone_name.value)
+            fat_id = get_or_create_folder(service, fat_name.value, parent_id=zone_id)
+            
+            # 2. جلب الملفات من المجلد
+            query = f"'{fat_id}' in parents and mimeType contains 'image/' and trashed=false"
+            results = service.files().list(q=query, fields="files(id, name)").execute()
+            files = results.get('files', [])
+
+            if not files:
+                images_grid.controls.append(Text("لا توجد صور في هذا المجلد"))
+            else:
+                for f in files:
+                    # الرابط المباشر للمعاينة
+                    img_url = f"https://lh3.googleusercontent.com/u/0/d/{f['id']}"
+                    
+                    images_grid.controls.append(
+                        Container(
+                            content=Column([
+                                Image(src=img_url, border_radius=10, fit=ImageFit.COVER, expand=True),
+                                Text(f['name'], size=12, weight="bold", overflow=TextOverflow.ELLIPSIS)
+                            ]),
+                            bgcolor=colors.SURFACE_VARIANT,
+                            padding=5,
+                            border_radius=10,
+                        )
+                    )
+            
+            page.snack_bar = SnackBar(Text("تم التحديث!"))
+            page.update()
+        except Exception as ex:
+            print(f"Error: {ex}")
+        
+    def gallery_view():
+        return Column([
+            Text("مستعرض الصور", size=20, weight="bold"),
+            ElevatedButton("تحديث المعرض", icon=icons.REFRESH, on_click=load_drive_images),
+            Divider(),
+            images_grid ,
+        ], expand=True)
+    
+    
+    def show_page_of_navBar(index):
+        page.vertical_alignment="center"
+        page.horizontal_alignment="center"
+        page.controls.clear()
+
+        if index == 0:
+            page.add(
+                Column(
+                    controls=[
+                        zone_name,fat_name
+                    ]
+                ),
+                Row(
+                    controls=[
+                        select_after_in,select_after_out                     
+                    ]
+                ),
+                Row(
+                    controls=[
+                        image_after_in,image_after_out
+                    ]
+                ),
+                Row(
+                    controls=[
+                        select_before_in,select_before_out
+                    ]
+                ),
+                Row(
+                    controls=[
+                        image_before_in,image_before_out
+                    ]
+                ),
+                Row(
+                    controls=[
+                        send_and_save
+                    ],alignment=MainAxisAlignment.CENTER
+                )
+            )
+
+        elif index == 1:
+            page.add(gallery_view())
+            load_drive_images(None)
+            page.update()
+        elif index ==2:
+            page.add(Text("3"))
+        page.update()
+    
+    nav_bar =NavigationBar(
+        adaptive=True,
+        animate_offset=300,
+        bgcolor="#7ea5df",
+        selected_index=0,
+        height=100,
+        on_change=lambda e: show_page_of_navBar(e.control.selected_index) ,
+        destinations=[
+            NavigationBarDestination(
+                icon=icons.HOME,
+                selected_icon=icons.HOME_OUTLINED ,
+                bgcolor=colors.WHITE
+
+            ),
+            NavigationBarDestination(
+                icon=icons.FILE_COPY,
+                selected_icon=icons.FILE_COPY_OUTLINED ,
+                bgcolor=colors.WHITE
+                
+
+            ),
+            NavigationBarDestination(
+                icon=icons.SEARCH_OUTLINED,
+                selected_icon=icons.SEARCH,
+                bgcolor=colors.WHITE
+
+            )
+        ]
+    )
+    page.navigation_bar =nav_bar
+    show_page_of_navBar(0)
+    page.update()
+app (main)
